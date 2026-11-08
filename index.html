@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Video Cryptid Games</title>
+<meta name="description" content="Video Cryptid Games Inc. is an independent game studio. Now developing UFOverload.">
+<meta name="theme-color" content="#000000">
+<link rel="icon" href="eyes.png">
+<link rel="preload" href="eyes.png" as="image">
+<style>
+  html, body { margin:0; height:100%; background:#000; overflow:hidden; }
+  body { color:#8a8f99; font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+
+  #intro { position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+           transition:opacity 1.2s ease; }
+  #intro video { width:100%; height:100%; object-fit:contain; background:#000; cursor:pointer; }
+  #intro.gone { opacity:0; pointer-events:none; }
+
+  #eyes { position:fixed; inset:0; pointer-events:none; }
+  .eye { position:absolute; opacity:0; }
+  .eye > div { width:100%; aspect-ratio:360/177; background:url(eyes.png) center/contain no-repeat;
+               transform-origin:center; }
+
+  footer { position:fixed; left:0; right:0; bottom:0; padding:14px 16px calc(84px + env(safe-area-inset-bottom, 0px)); text-align:center;
+           font-size:13px; letter-spacing:.03em; opacity:0; transition:opacity 2s ease 1s; }
+  footer.show { opacity:.75; }
+  footer a { color:#c94a5c; text-decoration:none; }
+  footer a:hover { text-decoration:underline; }
+  .sr { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); }
+
+  #play { position:fixed; inset:0; margin:auto; width:72px; height:72px; border-radius:50%;
+          border:1px solid #c94a5c; background:rgba(0,0,0,.6); color:#c94a5c; font-size:26px;
+          cursor:pointer; display:none; z-index:3; }
+
+  /* Tuning panel: only shown when the address ends in ?tune */
+  #tune { position:fixed; top:12px; left:12px; z-index:10; width:290px; max-height:calc(100vh - 24px);
+          overflow:auto; background:rgba(14,14,18,.92); border:1px solid #333; border-radius:10px;
+          padding:12px 14px; font-size:12px; color:#ccc; box-sizing:border-box; }
+  #tune h2 { margin:0 0 8px; font-size:13px; color:#fff; display:flex; justify-content:space-between; }
+  #tune h2 button { background:none; border:0; color:#888; cursor:pointer; font-size:14px; }
+  #tune .row { margin:9px 0; }
+  #tune .row label { display:flex; justify-content:space-between; }
+  #tune .row output { color:#ff6b80; font-variant-numeric:tabular-nums; }
+  #tune input[type=range] { width:100%; accent-color:#c94a5c; }
+  #tune .btns { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
+  #tune .btns button { flex:1 1 auto; background:#222; color:#ddd; border:1px solid #444;
+                       border-radius:6px; padding:6px 8px; cursor:pointer; font:inherit; }
+  #tune .btns button:hover { border-color:#c94a5c; }
+  #tune textarea { width:100%; height:120px; margin-top:8px; background:#000; color:#9f9;
+                   border:1px solid #333; font:11px/1.4 monospace; display:none; box-sizing:border-box; }
+  #tune .hint { color:#777; margin-top:6px; }
+  #tune.min > :not(h2) { display:none; }
+  @media (max-width:500px) { #tune { width:calc(100vw - 24px); max-height:55vh; } }
+</style>
+</head>
+<body>
+<h1 class="sr">Video Cryptid Games</h1>
+
+<div id="intro">
+  <video id="vid" src="intro.mp4" autoplay muted playsinline preload="auto"
+         aria-label="Video Cryptid Games logo intro. Click for sound."></video>
+</div>
+<button id="play" type="button" aria-label="Play intro">&#9654;</button>
+
+<div id="eyes" aria-hidden="true"></div>
+
+<footer id="foot">
+  Video Cryptid Games Inc. &middot; Now developing <em>UFOverload</em>
+  &middot; <a href="mailto:hello@videocryptidgames.com">hello@videocryptidgames.com</a>
+</footer>
+
+<script>
+/* ---- Eye settings. Tune them live at videocryptidgames.com/?tune ---- */
+var SETTINGS = {
+  sizeMin: 1.5,          // smallest pair, % of the shorter screen side
+  sizeMax: 9,         // largest pair
+  brightMin: 39,       // dimmest peak brightness, %
+  brightMax: 59,      // brightest peak brightness, %
+  flickerDepth: 71,    // how dark a flicker dip goes, %
+  flickerRate: 1.5,    // flicker dips per second (roughly)
+  glow: 12,            // red glow radius, px
+  spawnEvery: 470,     // average ms between new pairs
+  maxEyes: 7,          // most pairs on screen at once
+  lifeMin: 2.5,        // shortest time a pair stays, s
+  lifeMax: 6.5,        // longest time a pair stays, s
+  blinkChance: 31      // % of pairs that blink once
+};
+
+(function () {
+  var DEFAULTS = JSON.parse(JSON.stringify(SETTINGS)),
+      S = SETTINGS,
+      tuning = /[?&#]tune\b/.test(location.search + location.hash),
+      reduced = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches,
+      vid = document.getElementById('vid'),
+      intro = document.getElementById('intro'),
+      field = document.getElementById('eyes'),
+      foot = document.getElementById('foot'),
+      play = document.getElementById('play'),
+      started = false, loopTimer = null;
+
+  if (tuning) {
+    try { var saved = JSON.parse(localStorage.getItem('vcEyeSettings') || 'null');
+          if (saved) for (var k in saved) if (k in S) S[k] = saved[k]; } catch (e) {}
+  }
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+
+  // Random flicker pattern for one pair: steady glow with short dark dips.
+  function flickerFrames(cycle) {
+    var g = S.glow, frames = [], dips = Math.max(0, Math.round(S.flickerRate * cycle * rand(0.6, 1.4)));
+    function f(o, b) { frames.push({ offset: o,
+      filter: 'brightness(' + b.toFixed(2) + ') drop-shadow(0 0 ' + (g * b).toFixed(1) + 'px rgba(255,40,70,' + (0.55 * b).toFixed(2) + '))' }); }
+    var spots = [];
+    for (var i = 0; i < dips; i++) spots.push(rand(0.05, 0.9));
+    spots.sort();
+    f(0, 1);
+    var last = 0;
+    spots.forEach(function (o) {
+      var len = rand(0.01, 0.04), b = 1 - (S.flickerDepth / 100) * rand(0.5, 1);
+      if (o <= last + 0.01) return;
+      f(o, 1); f(Math.min(o + 0.005, 0.98), b); f(Math.min(o + len, 0.99), 1);
+      last = o + len;
+    });
+    f(1, 1);
+    return frames;
+  }
+
+  function spawn() {
+    var outer = document.createElement('div'), inner = document.createElement('div'),
+        lo = Math.min(S.sizeMin, S.sizeMax), hi = Math.max(S.sizeMin, S.sizeMax),
+        w = Math.min(innerWidth, innerHeight) * rand(lo, hi) / 100,
+        life = rand(Math.min(S.lifeMin, S.lifeMax), Math.max(S.lifeMin, S.lifeMax)) * 1000,
+        peak = rand(Math.min(S.brightMin, S.brightMax), Math.max(S.brightMin, S.brightMax)) / 100;
+    outer.className = 'eye';
+    outer.style.width = w + 'px';
+    outer.style.left = rand(0, Math.max(0, innerWidth - w)) + 'px';
+    outer.style.top = rand(0, Math.max(0, innerHeight - w * 0.5 - foot.offsetHeight - 8)) + 'px';
+    outer.appendChild(inner);
+    field.appendChild(outer);
+
+    outer.animate([{ opacity: 0 }, { opacity: peak, offset: 0.12 }, { opacity: peak, offset: 0.82 }, { opacity: 0 }],
+                  { duration: life, fill: 'forwards' });
+    if (!reduced && S.flickerRate > 0 && S.flickerDepth > 0) {
+      var cycle = rand(1.5, 3);
+      inner.animate(flickerFrames(cycle), { duration: cycle * 1000, iterations: Infinity, delay: -rand(0, cycle * 1000) });
+    } else {
+      inner.style.filter = 'drop-shadow(0 0 ' + S.glow + 'px rgba(255,40,70,.55))';
+    }
+    if (!reduced && Math.random() * 100 < S.blinkChance) {
+      setTimeout(function () {
+        inner.animate([{ transform: 'scaleY(1)' }, { transform: 'scaleY(.08)' }, { transform: 'scaleY(1)' }],
+                      { duration: 180, easing: 'ease-in-out' });
+      }, rand(800, life * 0.7));
+    }
+    setTimeout(function () { outer.remove(); }, life + 100);
+  }
+
+  function loop() {
+    if (field.childElementCount < S.maxEyes) spawn();
+    loopTimer = setTimeout(loop, rand(0.45, 1.55) * S.spawnEvery);
+  }
+
+  function startEyes() {
+    if (started) return;
+    started = true;
+    intro.classList.add('gone');
+    play.style.display = 'none';
+    foot.classList.add('show');
+    for (var i = 0; i < Math.min(4, S.maxEyes); i++) setTimeout(spawn, 300 + i * 350);
+    loopTimer = setTimeout(loop, 1500);
+  }
+
+  vid.addEventListener('ended', startEyes);
+  vid.addEventListener('error', startEyes);
+
+  // Click the logo while it plays to hear it.
+  vid.addEventListener('click', function () { vid.muted = false; if (vid.paused) vid.play(); });
+
+  // If the browser blocks autoplay, offer a play button; never strand the visitor on black.
+  setTimeout(function () { if (!started && vid.paused && vid.currentTime === 0) play.style.display = 'block'; }, 1500);
+  setTimeout(function () { if (!started && vid.currentTime === 0) startEyes(); }, 10000);
+  play.addEventListener('click', function () {
+    play.style.display = 'none';
+    var p = vid.play(); if (p && p.catch) p.catch(startEyes);
+  });
+
+  if (!tuning) return;
+
+  /* ---------------- Tuning panel ---------------- */
+  var CONTROLS = [
+    ['sizeMin', 'Smallest size (% of screen)', 1, 40, 0.5],
+    ['sizeMax', 'Largest size (% of screen)', 1, 40, 0.5],
+    ['brightMin', 'Dimmest brightness (%)', 5, 100, 1],
+    ['brightMax', 'Brightest brightness (%)', 5, 100, 1],
+    ['flickerDepth', 'Flicker depth (%)', 0, 100, 1],
+    ['flickerRate', 'Flickers per second', 0, 8, 0.1],
+    ['glow', 'Glow radius (px)', 0, 40, 1],
+    ['spawnEvery', 'New pair every (ms)', 50, 3000, 10],
+    ['maxEyes', 'Max pairs on screen', 1, 40, 1],
+    ['lifeMin', 'Shortest stay (s)', 0.5, 15, 0.1],
+    ['lifeMax', 'Longest stay (s)', 0.5, 15, 0.1],
+    ['blinkChance', 'Blink chance (%)', 0, 100, 1]
+  ];
+  var panel = document.createElement('div');
+  panel.id = 'tune';
+  var html = '<h2>Eye tuner <button type="button" id="tMin" title="Collapse">&#8211;</button></h2>';
+  CONTROLS.forEach(function (c) {
+    html += '<div class="row"><label for="t_' + c[0] + '">' + c[1] + ' <output id="o_' + c[0] + '"></output></label>' +
+            '<input type="range" id="t_' + c[0] + '" min="' + c[2] + '" max="' + c[3] + '" step="' + c[4] + '"></div>';
+  });
+  html += '<div class="btns"><button type="button" id="tSkip">Skip intro</button><button type="button" id="tReplay">Replay intro</button>' +
+          '<button type="button" id="tClear">Clear eyes</button><button type="button" id="tReset">Reset</button>' +
+          '<button type="button" id="tCopy">Copy settings</button></div>' +
+          '<textarea id="tOut" readonly></textarea>' +
+          '<div class="hint">New eyes use the new values. Your settings are kept in this browser. When you like it, Copy settings and paste them to Claude.</div>';
+  panel.innerHTML = html;
+  document.body.appendChild(panel);
+
+  function save() { try { localStorage.setItem('vcEyeSettings', JSON.stringify(S)); } catch (e) {} }
+  function sync() {
+    CONTROLS.forEach(function (c) {
+      document.getElementById('t_' + c[0]).value = S[c[0]];
+      document.getElementById('o_' + c[0]).textContent = S[c[0]];
+    });
+  }
+  CONTROLS.forEach(function (c) {
+    document.getElementById('t_' + c[0]).addEventListener('input', function (e) {
+      S[c[0]] = parseFloat(e.target.value);
+      document.getElementById('o_' + c[0]).textContent = S[c[0]];
+      save();
+    });
+  });
+  sync();
+
+  function clearEyes() { field.innerHTML = ''; }
+  document.getElementById('tMin').onclick = function () { panel.classList.toggle('min'); };
+  document.getElementById('tSkip').onclick = function () { vid.pause(); startEyes(); };
+  document.getElementById('tClear').onclick = clearEyes;
+  document.getElementById('tReplay').onclick = function () {
+    clearTimeout(loopTimer); clearEyes(); started = false;
+    foot.classList.remove('show'); intro.classList.remove('gone');
+    vid.currentTime = 0; vid.play();
+  };
+  document.getElementById('tReset').onclick = function () {
+    for (var k in DEFAULTS) S[k] = DEFAULTS[k];
+    save(); sync();
+  };
+  document.getElementById('tCopy').onclick = function () {
+    var out = document.getElementById('tOut'), txt = 'var SETTINGS = ' + JSON.stringify(S, null, 2) + ';';
+    out.value = txt; out.style.display = 'block'; out.select();
+    var btn = this;
+    try { navigator.clipboard.writeText(txt).then(function () { btn.textContent = 'Copied!'; },
+                                                  function () { btn.textContent = 'Select & copy below'; }); }
+    catch (e) { btn.textContent = 'Select & copy below'; }
+  };
+})();
+</script>
+</body>
+</html>
